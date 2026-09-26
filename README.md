@@ -62,7 +62,7 @@ Restart the shell afterwards. The app also auto-detects the winget install locat
 
 | Method | Route | Body / params |
 | --- | --- | --- |
-| `POST` | `/api/info` | `{"url": "..."}` → title, thumbnail, duration, formats + `platform`, `video_id`, `embed_url`, `direct_url`, `media` (for inline preview) |
+| `POST` | `/api/info` | `{"url": "..."}` → title, thumbnail, duration, formats |
 | `POST` | `/api/download` | `{"urls": [...], "mode": "video"\|"audio", "quality": "1080"\|"mp3"\|..., "playlist": false}` |
 | `GET` | `/api/jobs` | job list + progress |
 | `GET` | `/api/events` | Server-Sent Events stream — job updates pushed only when something changes |

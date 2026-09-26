@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
 from yt_dlp.utils import DownloadCancelled, DownloadError
@@ -36,103 +35,6 @@ VIDEO_QUALITIES: Dict[str, Optional[int]] = {
 }
 AUDIO_FORMATS = ("mp3", "m4a", "opus")
 ACTIVE_STATUSES = ("queued", "downloading", "processing")
-
-# Fallback artwork when an extractor returns no thumbnail.
-PLACEHOLDER_THUMBNAIL = "https://placehold.co/640x360/1e293b/10b981?text=No+Preview"
-
-# Hostname → platform mapping used for inline-preview branching.
-_PLATFORM_HOSTS = (
-    (("youtube.com", "youtu.be", "youtube-nocookie.com"), "youtube"),
-    (("facebook.com", "fb.watch", "fb.com"), "facebook"),
-    (("instagram.com",), "instagram"),
-    (("pinterest.com", "pin.it"), "pinterest"),
-    (("tiktok.com",), "tiktok"),
-    (("twitter.com", "x.com"), "twitter"),
-)
-
-_YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
-_YT_PATH_RE = re.compile(r"/(?:shorts|embed|live|v)/([A-Za-z0-9_-]{11})")
-
-
-def detect_platform(page_url: str) -> str:
-    """Map a page URL to a preview platform via its hostname."""
-    try:
-        host = (urlparse(page_url).hostname or "").lower()
-    except Exception:
-        return "generic"
-    host = host[4:] if host.startswith("www.") else host
-    for suffixes, platform in _PLATFORM_HOSTS:
-        if any(host == s or host.endswith("." + s) for s in suffixes):
-            return platform
-    return "generic"
-
-
-def extract_youtube_id(page_url: str) -> Optional[str]:
-    """Pull the 11-char video ID from any common YouTube URL shape.
-
-    Handles youtu.be/ID, /watch?v=ID (extra params ignored),
-    /shorts/ID, /embed/ID, /live/ID and /v/ID.
-    """
-    try:
-        parsed = urlparse(page_url)
-    except Exception:
-        return None
-    host = (parsed.hostname or "").lower()
-    host = host[4:] if host.startswith("www.") else host
-    if host == "youtu.be":
-        candidate = parsed.path.strip("/").split("/")[0] if parsed.path.strip("/") else ""
-        return candidate if _YT_ID_RE.match(candidate) else None
-    if host.endswith("youtube.com") or host.endswith("youtube-nocookie.com"):
-        qs = parse_qs(parsed.query or "")
-        for value in qs.get("v", []):
-            if _YT_ID_RE.match(value or ""):
-                return value
-        match = _YT_PATH_RE.search(parsed.path or "")
-        if match:
-            return match.group(1)
-    return None
-
-
-def youtube_embed_url(video_id: Optional[str]) -> Optional[str]:
-    if not video_id or not _YT_ID_RE.match(video_id):
-        return None
-    return f"https://www.youtube.com/embed/{video_id}?rel=0&modestbranding=1&playsinline=1&cc_load_policy=0&cc_lang_pref=&iv_load_policy=3&fs=1"
-
-
-def _is_http_url(value: Any) -> bool:
-    return isinstance(value, str) and value.lower().startswith(("http://", "https://"))
-
-
-def pick_direct_url(info: Dict[str, Any]) -> Optional[str]:
-    """Best directly-playable media URL from a (single-video) info dict.
-
-    Prefers progressive MP4 (video+audio) at the highest height so a plain
-    <video>/<img> tag can play it; falls back to the top-level url, then to
-    any format url. Returns None when nothing playable exists.
-    """
-    formats = [f for f in (info.get("formats") or []) if isinstance(f, dict) and _is_http_url(f.get("url"))]
-    progressive = [
-        f for f in formats
-        if (f.get("vcodec") not in (None, "none")) and (f.get("acodec") not in (None, "none"))
-    ]
-
-    def rank(f: Dict[str, Any]) -> tuple:
-        mp4 = 1 if (f.get("ext") or "").lower() == "mp4" else 0
-        return (mp4, int(f.get("height") or 0), float(f.get("tbr") or f.get("filesize") or 0))
-
-    for pool in (progressive, formats):
-        if pool:
-            return sorted(pool, key=rank, reverse=True)[0]["url"]
-    if _is_http_url(info.get("url")):
-        return info["url"]
-    return None
-
-
-def is_image_url(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    path = urlparse(value).path.lower()
-    return any(path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"))
 
 # Human-friendly resolution tags appended to video filenames before .mp4,
 # e.g. "My Video - [720p HD].mp4", "My Video - [1080p Full HD].mp4".
@@ -268,7 +170,9 @@ def clean_error(exc: BaseException) -> str:
         return "This video is unavailable or deleted."
     if "private video" in low:
         return "This video is private. Login required (upload cookies.txt)."
-    if "age" in low and ("confirm" in low or "restricted" in low or "gate" in low):
+    # NOTE: \bage\b (not `"age" in low`) — bare substring matches words
+    # like "webpage"/"message" and shows a wrong age-restriction error.
+    if re.search(r"\bage\b", low) and ("confirm" in low or "restricted" in low or "gate" in low):
         return "Age-restricted video. Login required (upload cookies.txt)."
     if "sign in" in low or "log in" in low or "login required" in low or "cookies" in low and "required" in low:
         return "Login required. Upload cookies.txt and retry."
@@ -687,12 +591,22 @@ def build_options(job: Job) -> Dict[str, Any]:
     if job.mode == "audio":
         codec = job.quality if job.quality in AUDIO_FORMATS else "mp3"
         opts["format"] = "bestaudio/best"
+        # writethumbnail downloads the cover art so EmbedThumbnail can mux
+        # it into the audio file (Telegram/shows cover instead of blank icon).
+        opts["writethumbnail"] = True
         opts["postprocessors"] = [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": codec,
                 "preferredquality": "192",
-            }
+            },
+            {
+                "key": "FFmpegMetadata",
+                "add_metadata": True,
+            },
+            {
+                "key": "EmbedThumbnail",
+            },
         ]
     else:
         opts["format"] = video_format_selector(job.quality)
@@ -812,7 +726,6 @@ def probe(url: str) -> Dict[str, Any]:
     ]
     thumbnails = info.get("thumbnails") or []
     thumbnail = info.get("thumbnail") or (thumbnails[-1].get("url") if thumbnails else "")
-    thumbnail = thumbnail or PLACEHOLDER_THUMBNAIL
     heights = sorted(
         {
             f.get("height")
@@ -821,18 +734,6 @@ def probe(url: str) -> Dict[str, Any]:
         },
         reverse=True,
     )
-    # --- Inline-preview enrichment (additive; existing fields untouched) ---
-    page_url = info.get("webpage_url") or url
-    platform = detect_platform(page_url)
-    video_id: Optional[str] = None
-    if platform == "youtube":
-        video_id = extract_youtube_id(page_url)
-        if not video_id:
-            info_id = info.get("id")
-            video_id = info_id if isinstance(info_id, str) and _YT_ID_RE.match(info_id) else None
-    direct_url: Optional[str] = None
-    if not is_playlist and platform != "youtube":
-        direct_url = pick_direct_url(info)
     return {
         "ok": True,
         "type": "playlist" if is_playlist else "video",
@@ -840,13 +741,8 @@ def probe(url: str) -> Dict[str, Any]:
         "uploader": info.get("uploader") or info.get("channel") or "",
         "duration": durations,
         "thumbnail": thumbnail,
-        "url": page_url,
+        "url": info.get("webpage_url") or url,
         "count": info.get("playlist_count") or len(entries) or 1,
         "entries": entries,
         "heights": [h for h in heights if h],
-        "platform": platform,
-        "video_id": video_id,
-        "embed_url": youtube_embed_url(video_id),
-        "direct_url": direct_url,
-        "media": "image" if is_image_url(direct_url) else "video",
     }
