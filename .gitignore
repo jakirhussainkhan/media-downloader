@@ -9,6 +9,13 @@ venv/
 # Downloads (user content, large binaries)
 downloads/
 
+# Local SQLite job history
+jobs.db
+*.db
+
+# Uploaded browser cookies (private session data)
+cookies/
+
 # OS / editor
 .DS_Store
 Thumbs.db

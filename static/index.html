@@ -4,31 +4,56 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#07070b">
+  <meta name="theme-color" content="#07070f">
+  <meta name="description" content="Ultimate Media Downloader — download videos and audio from YouTube, Facebook, Instagram, TikTok, X and Pinterest.">
   <title>Ultimate Media Downloader</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%86%93%3C/text%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%238B5CF6'/%3E%3Cstop offset='1' stop-color='%233B82F6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Ctext x='16' y='23' font-size='18' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='bold'%3E%E2%86%93%3C/text%3E%3C/svg%3E">
+  <!-- Typography: Outfit for display, Inter for body -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <!-- Apply saved theme before first paint (no flash) -->
+  <script>
+    try {
+      var savedTheme = localStorage.getItem("md-theme");
+      document.documentElement.dataset.theme = savedTheme === "light" ? "light" : "dark";
+    } catch (e) { document.documentElement.dataset.theme = "dark"; }
+  </script>
+  <!-- Icons: Lucide (lightweight, MIT) -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="bg-orbs" aria-hidden="true">
-    <span class="orb orb-1"></span>
-    <span class="orb orb-2"></span>
-    <span class="orb orb-3"></span>
+  <!-- Animated ambient background: deep-space gradient + drifting glow blobs -->
+  <div class="bg" aria-hidden="true">
+    <span class="blob blob-1"></span>
+    <span class="blob blob-2"></span>
+    <span class="blob blob-3"></span>
+    <span class="blob blob-4"></span>
+    <div class="stars"></div>
   </div>
 
+  <!-- ============ Header ============ -->
   <header class="topbar">
     <div class="wrap topbar-inner">
       <div class="topbar-left">
-        <span class="conn-pill" id="conn-pill" data-state="live" title="Live updates">Live</span>
+        <span class="conn-pill" id="conn-pill" data-state="live" title="Live updates">
+          <span class="pill-dot"></span><span class="pill-text">Live</span>
+        </span>
       </div>
-      <div class="brand-text brand-centered">
-        <div class="brand-title-row">
+      <div class="brand brand-centered">
+        <div class="brand-badge" aria-hidden="true"><i data-lucide="download"></i></div>
+        <div class="brand-text">
           <h1>Ultimate Media Downloader</h1>
-          <span class="logo logo-inline" aria-hidden="true">&#8595;</span>
+          <p class="platforms">YouTube &middot; Facebook &middot; Instagram &middot; TikTok &middot; X &middot; Pinterest</p>
         </div>
-        <p>YouTube &middot; Facebook &middot; Instagram &middot; TikTok &middot; X</p>
       </div>
-      <div class="topbar-right" aria-hidden="true"></div>
+      <div class="topbar-right">
+        <button type="button" id="theme-toggle" class="theme-toggle" data-tip="Toggle dark / light theme" aria-label="Toggle dark / light theme">
+          <i data-lucide="sun" class="icon-sun"></i>
+          <i data-lucide="moon" class="icon-moon"></i>
+        </button>
+      </div>
     </div>
   </header>
 
@@ -37,17 +62,20 @@
   </div>
 
   <main class="wrap">
-    <section class="card glass">
+    <!-- ============ Input card ============ -->
+    <section class="card glass input-card" aria-label="New download">
       <label class="label" for="urls">
-        Links <span class="hint">one per line &mdash; videos, Shorts, Reels, TikToks, tweets</span>
+        <i data-lucide="link"></i>
+        Links
+        <span class="hint">one per line &mdash; videos, Shorts, Reels, TikToks, tweets, Pins</span>
       </label>
       <textarea id="urls" rows="4" spellcheck="false" autocomplete="off"
-        placeholder="Paste links here, one per line&#10;https://www.youtube.com/watch?v=...&#10;https://www.tiktok.com/@user/video/1234567890"></textarea>
+        placeholder="Paste links here, one per line&#10;https://www.youtube.com/watch?v=...&#10;https://www.tiktok.com/@user/video/1234567890&#10;https://www.pinterest.com/pin/..."></textarea>
 
       <div class="options">
-        <div class="segmented" id="mode">
-          <button type="button" class="active" data-mode="video">Video</button>
-          <button type="button" data-mode="audio">Audio</button>
+        <div class="segmented" id="mode" role="tablist" aria-label="Download mode">
+          <button type="button" class="active" data-mode="video"><i data-lucide="clapperboard"></i><span class="btn-label">Video</span></button>
+          <button type="button" data-mode="audio"><i data-lucide="music"></i><span class="btn-label">Audio</span></button>
         </div>
 
         <select id="quality" aria-label="Quality"></select>
@@ -59,26 +87,59 @@
 
         <div class="spacer"></div>
 
-        <button type="button" id="fetch" class="btn ghost">Preview</button>
-        <button type="button" id="download" class="btn primary">Download</button>
+        <button type="button" id="fetch" class="btn ghost" data-tip="Fetch title, thumbnail & quality info"><i data-lucide="search"></i><span class="btn-label">Preview</span></button>
+        <button type="button" id="download" class="btn primary" data-tip="Queue downloads (Ctrl+Enter)"><i data-lucide="arrow-down-to-line"></i><span class="btn-label">Download</span></button>
+        <button type="button" id="cookies-btn" class="btn ghost small" data-tip="Upload cookies.txt to unlock private videos"><i data-lucide="cookie"></i><span class="btn-label">Upload Cookies</span></button>
+        <input type="file" id="cookies-input" accept=".txt" hidden>
       </div>
 
       <p id="form-error" class="error hidden" role="alert" aria-live="assertive"></p>
       <div id="preview" class="preview hidden"></div>
     </section>
 
-    <section>
+    <!-- ============ Downloads section ============ -->
+    <section aria-label="Downloads">
       <div class="section-head">
-        <h2>Downloads</h2>
-        <button type="button" id="clear" class="btn ghost small">Clear finished</button>
+        <h2><i data-lucide="layers"></i>Downloads</h2>
+        <div class="section-actions">
+          <button type="button" id="clear" class="btn ghost small" data-tip="Remove all completed downloads"><i data-lucide="check-check"></i><span class="btn-label">Clear finished</span></button>
+          <button type="button" id="clear-failed" class="btn ghost small danger" data-tip="Remove all failed downloads"><i data-lucide="x-circle"></i><span class="btn-label">Clear Failed</span></button>
+        </div>
+      </div>
+      <div class="search-wrap">
+        <i data-lucide="search" class="search-icon"></i>
+        <input type="search" id="search" placeholder="Search by title or status…" autocomplete="off" aria-label="Search downloads">
       </div>
       <div id="jobs" class="jobs">
         <p class="empty glass" id="empty">Nothing here yet &mdash; paste a link above and hit Download.</p>
+        <!-- Initial loading skeletons (removed on first live update) -->
+        <div class="jobs-loading" id="jobs-loading" aria-hidden="true">
+          <div class="job glass skeleton-card"><div class="skeleton skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-bar"></div></div></div>
+          <div class="job glass skeleton-card"><div class="skeleton skeleton-thumb"></div><div class="skeleton-lines"><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-bar"></div></div></div>
+        </div>
       </div>
     </section>
   </main>
 
-  <div id="toast" class="toast glass" role="status" aria-live="polite"></div>
+  <footer class="wrap footer">
+    <p>Crafted with glass &amp; gradients &mdash; your downloads, beautifully tracked.</p>
+  </footer>
+
+  <!-- Glass confirmation modal (replaces native confirm() for destructive clears) -->
+  <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card glass" role="document">
+      <h3 id="confirm-title">Are you sure?</h3>
+      <p id="confirm-message"></p>
+      <div class="modal-actions">
+        <button type="button" id="confirm-cancel" class="btn ghost">Cancel</button>
+        <button type="button" id="confirm-ok" class="btn primary"><span class="btn-label">Confirm</span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stacked glass toast notifications (top-right) -->
+  <div id="toast" class="toast-stack" aria-live="polite"></div>
 
   <script src="/static/app.js"></script>
 </body>

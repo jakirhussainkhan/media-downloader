@@ -6,12 +6,12 @@ import time
 from pathlib import Path
 from typing import List
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from downloader import AUDIO_FORMATS, DOWNLOAD_DIR, VIDEO_QUALITIES, JobManager, probe
+from downloader import AUDIO_FORMATS, COOKIE_FILE, COOKIES_DIR, DOWNLOAD_DIR, VIDEO_QUALITIES, JobManager, probe
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -25,6 +25,7 @@ app = FastAPI(title="Ultimate Media Downloader", version="1.0")
 manager = JobManager()
 
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+COOKIES_DIR.mkdir(exist_ok=True)
 
 
 class InfoRequest(BaseModel):
@@ -54,6 +55,34 @@ def get_info(req: InfoRequest) -> dict:
     if not url.lower().startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Enter a valid link starting with http(s)://")
     return probe(url)
+
+
+@app.post("/api/upload-cookies")
+async def upload_cookies(file: UploadFile = File(...)) -> dict:
+    """Save an uploaded browser cookies.txt for private/login-gated videos.
+
+    Always stored as cookies/cookies.txt (uploaded filename is ignored
+    except for a .txt sanity check) so yt-dlp can pick it up via
+    ``cookiefile`` in build_options()/probe().
+    """
+    name = (file.filename or "").lower()
+    if not name.endswith(".txt"):
+        raise HTTPException(status_code=400, detail="Please upload a cookies .txt file")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(data) > 1_000_000:
+        raise HTTPException(status_code=400, detail="Cookies file too large (max 1 MB)")
+    COOKIES_DIR.mkdir(exist_ok=True)
+    COOKIE_FILE.write_bytes(data)
+    return {"ok": True, "file": COOKIE_FILE.name, "size": len(data)}
+
+
+@app.get("/api/cookies/status")
+def cookies_status() -> dict:
+    exists = COOKIE_FILE.is_file()
+    size = COOKIE_FILE.stat().st_size if exists else 0
+    return {"ok": True, "uploaded": exists and size > 0, "size": size}
 
 
 @app.post("/api/download")
@@ -142,6 +171,16 @@ def get_job(job_id: str) -> dict:
     return job.to_dict()
 
 
+@app.post("/api/jobs/{job_id}/retry")
+def retry_job(job_id: str) -> dict:
+    """Re-queue a failed/cancelled job with the same URL/mode/quality."""
+    old = manager.get(job_id)
+    if not old:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = manager.create(old.url, old.mode, old.quality, old.playlist)
+    return {"job": job.to_dict(), "retried_from": old.id}
+
+
 @app.get("/api/jobs/{job_id}/file")
 def get_file(job_id: str) -> FileResponse:
     job = manager.get(job_id)
@@ -170,7 +209,9 @@ def delete_job(job_id: str, drop: bool = Query(default=True)) -> dict:
 
 
 @app.delete("/api/jobs")
-def clear_jobs() -> dict:
+def clear_jobs(status: str | None = Query(default=None)) -> dict:
+    if status in ("failed", "error"):
+        return {"ok": True, "removed": manager.clear_failed()}
     return {"ok": True, "removed": manager.clear_done()}
 
 

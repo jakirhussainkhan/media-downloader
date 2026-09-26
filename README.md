@@ -1,11 +1,12 @@
 # Media Downloader
 
-A small self-hosted web app for downloading media from **YouTube, Facebook, Instagram, TikTok and X (Twitter)**.
+A small self-hosted web app for downloading media from **YouTube, Facebook, Instagram, TikTok, X (Twitter) and Pinterest**.
 
 Built with **FastAPI + yt-dlp**, single-page UI, live progress bars.
 
 ## Features
 
+- Supports YouTube, Facebook, Instagram, TikTok, X (Twitter) and Pinterest
 - Paste multiple links at once (batch downloads)
 - Video (MP4) or audio only (MP3 / M4A / OPUS)
 - Quality selection: best / 4K / 1440p / 1080p / 720p / 480p / 360p
@@ -26,14 +27,27 @@ Built with **FastAPI + yt-dlp**, single-page UI, live progress bars.
 .\run.ps1
 ```
 
-Then open <http://127.0.0.1:8000>.
+Then open <http://127.0.0.1:8000> on this PC.
+
+### Access from your phone (same Wi-Fi)
+
+The server listens on `0.0.0.0:8000`, so any device on your local network
+can reach it via your PC's LAN IP, e.g. `http://192.168.x.x:8000`:
+
+1. Make sure your phone and PC are on the same Wi-Fi.
+2. Find your PC's IPv4 address (`ipconfig` → IPv4 Address, e.g. `192.168.1.10`).
+3. On your mobile browser, open `http://192.168.1.10:8000`
+   (replace with your actual IP).
+
+> Windows may prompt to allow Python/Uvicorn through the firewall on first
+> LAN access — click Allow.
 
 Manual start:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 ### Installing ffmpeg (once, Windows)
@@ -48,7 +62,7 @@ Restart the shell afterwards. The app also auto-detects the winget install locat
 
 | Method | Route | Body / params |
 | --- | --- | --- |
-| `POST` | `/api/info` | `{"url": "..."}` → title, thumbnail, duration, formats |
+| `POST` | `/api/info` | `{"url": "..."}` → title, thumbnail, duration, formats + `platform`, `video_id`, `embed_url`, `direct_url`, `media` (for inline preview) |
 | `POST` | `/api/download` | `{"urls": [...], "mode": "video"\|"audio", "quality": "1080"\|"mp3"\|..., "playlist": false}` |
 | `GET` | `/api/jobs` | job list + progress |
 | `GET` | `/api/events` | Server-Sent Events stream — job updates pushed only when something changes |

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
+import sqlite3
 import threading
 import time
 import uuid
@@ -9,12 +11,16 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
 from yt_dlp.utils import DownloadCancelled, DownloadError
 
 BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
+DB_PATH = BASE_DIR / "jobs.db"
+COOKIES_DIR = BASE_DIR / "cookies"
+COOKIE_FILE = COOKIES_DIR / "cookies.txt"
 
 MAX_CONCURRENT_DOWNLOADS = 3
 MAX_JOBS_KEPT = 100
@@ -30,6 +36,103 @@ VIDEO_QUALITIES: Dict[str, Optional[int]] = {
 }
 AUDIO_FORMATS = ("mp3", "m4a", "opus")
 ACTIVE_STATUSES = ("queued", "downloading", "processing")
+
+# Fallback artwork when an extractor returns no thumbnail.
+PLACEHOLDER_THUMBNAIL = "https://placehold.co/640x360/1e293b/10b981?text=No+Preview"
+
+# Hostname → platform mapping used for inline-preview branching.
+_PLATFORM_HOSTS = (
+    (("youtube.com", "youtu.be", "youtube-nocookie.com"), "youtube"),
+    (("facebook.com", "fb.watch", "fb.com"), "facebook"),
+    (("instagram.com",), "instagram"),
+    (("pinterest.com", "pin.it"), "pinterest"),
+    (("tiktok.com",), "tiktok"),
+    (("twitter.com", "x.com"), "twitter"),
+)
+
+_YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_YT_PATH_RE = re.compile(r"/(?:shorts|embed|live|v)/([A-Za-z0-9_-]{11})")
+
+
+def detect_platform(page_url: str) -> str:
+    """Map a page URL to a preview platform via its hostname."""
+    try:
+        host = (urlparse(page_url).hostname or "").lower()
+    except Exception:
+        return "generic"
+    host = host[4:] if host.startswith("www.") else host
+    for suffixes, platform in _PLATFORM_HOSTS:
+        if any(host == s or host.endswith("." + s) for s in suffixes):
+            return platform
+    return "generic"
+
+
+def extract_youtube_id(page_url: str) -> Optional[str]:
+    """Pull the 11-char video ID from any common YouTube URL shape.
+
+    Handles youtu.be/ID, /watch?v=ID (extra params ignored),
+    /shorts/ID, /embed/ID, /live/ID and /v/ID.
+    """
+    try:
+        parsed = urlparse(page_url)
+    except Exception:
+        return None
+    host = (parsed.hostname or "").lower()
+    host = host[4:] if host.startswith("www.") else host
+    if host == "youtu.be":
+        candidate = parsed.path.strip("/").split("/")[0] if parsed.path.strip("/") else ""
+        return candidate if _YT_ID_RE.match(candidate) else None
+    if host.endswith("youtube.com") or host.endswith("youtube-nocookie.com"):
+        qs = parse_qs(parsed.query or "")
+        for value in qs.get("v", []):
+            if _YT_ID_RE.match(value or ""):
+                return value
+        match = _YT_PATH_RE.search(parsed.path or "")
+        if match:
+            return match.group(1)
+    return None
+
+
+def youtube_embed_url(video_id: Optional[str]) -> Optional[str]:
+    if not video_id or not _YT_ID_RE.match(video_id):
+        return None
+    return f"https://www.youtube.com/embed/{video_id}?rel=0&modestbranding=1&playsinline=1&cc_load_policy=0&cc_lang_pref=&iv_load_policy=3&fs=1"
+
+
+def _is_http_url(value: Any) -> bool:
+    return isinstance(value, str) and value.lower().startswith(("http://", "https://"))
+
+
+def pick_direct_url(info: Dict[str, Any]) -> Optional[str]:
+    """Best directly-playable media URL from a (single-video) info dict.
+
+    Prefers progressive MP4 (video+audio) at the highest height so a plain
+    <video>/<img> tag can play it; falls back to the top-level url, then to
+    any format url. Returns None when nothing playable exists.
+    """
+    formats = [f for f in (info.get("formats") or []) if isinstance(f, dict) and _is_http_url(f.get("url"))]
+    progressive = [
+        f for f in formats
+        if (f.get("vcodec") not in (None, "none")) and (f.get("acodec") not in (None, "none"))
+    ]
+
+    def rank(f: Dict[str, Any]) -> tuple:
+        mp4 = 1 if (f.get("ext") or "").lower() == "mp4" else 0
+        return (mp4, int(f.get("height") or 0), float(f.get("tbr") or f.get("filesize") or 0))
+
+    for pool in (progressive, formats):
+        if pool:
+            return sorted(pool, key=rank, reverse=True)[0]["url"]
+    if _is_http_url(info.get("url")):
+        return info["url"]
+    return None
+
+
+def is_image_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    path = urlparse(value).path.lower()
+    return any(path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"))
 
 # Human-friendly resolution tags appended to video filenames before .mp4,
 # e.g. "My Video - [720p HD].mp4", "My Video - [1080p Full HD].mp4".
@@ -52,6 +155,16 @@ def find_ffmpeg() -> Optional[str]:
     if root.exists():
         for cand in root.glob("**/ffmpeg.exe"):
             return str(cand.parent)
+    return None
+
+
+def get_cookiefile() -> Optional[str]:
+    """Return the cookies.txt path if one has been uploaded, else None."""
+    try:
+        if COOKIE_FILE.is_file() and COOKIE_FILE.stat().st_size > 0:
+            return str(COOKIE_FILE)
+    except OSError:
+        pass
     return None
 
 
@@ -140,9 +253,36 @@ def finalize_video_path(original: str, job: Job) -> str:
 
 
 def clean_error(exc: BaseException) -> str:
-    msg = str(exc) or exc.__class__.__name__
-    msg = re.sub(r"\x1b\[[0-9;]*m", "", msg)
-    msg = msg.split("Traceback (most recent call last)")[0]
+    raw = str(exc) or exc.__class__.__name__
+    raw = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+    low = raw.lower()
+    # Friendly mapping for the most common yt-dlp failures (checked first
+    # so users get plain English instead of raw extractor output).
+    if "http error 403" in low or "403" in low and "forbidden" in low:
+        return "Login required or video is private. Try uploading cookies.txt."
+    if "http error 429" in low or "too many requests" in low:
+        return "Rate limited. Please wait a bit and retry."
+    if "http error 404" in low or "404" in low and "not found" in low:
+        return "Video not found."
+    if "video unavailable" in low:
+        return "This video is unavailable or deleted."
+    if "private video" in low:
+        return "This video is private. Login required (upload cookies.txt)."
+    if "age" in low and ("confirm" in low or "restricted" in low or "gate" in low):
+        return "Age-restricted video. Login required (upload cookies.txt)."
+    if "sign in" in low or "log in" in low or "login required" in low or "cookies" in low and "required" in low:
+        return "Login required. Upload cookies.txt and retry."
+    if "copyright" in low:
+        return "Blocked on copyright grounds."
+    if "unsupported url" in low or "no video formats" in low or "unable to extract" in low:
+        return "Unsupported link or no downloadable media found."
+    if "timed out" in low or "timeout" in low or "connection" in low and ("reset" in low or "refused" in low or "failed" in low or "aborted" in low):
+        return "Network error. Check your connection and retry."
+    if "name resolution" in low or "nodename nor servname" in low or "getaddrinfo failed" in low:
+        return "Network error (DNS). Check your connection and retry."
+    if "ffmpeg" in low and ("not found" in low or "not installed" in low):
+        return "ffmpeg is missing. Install ffmpeg and restart."
+    msg = raw.split("Traceback (most recent call last)")[0]
     msg = re.sub(r"^\s*(ERROR|WARNING):\s*", "", msg, flags=re.IGNORECASE)
     msg = re.sub(r"\s*use --verbose options to see.*$", "", msg, flags=re.IGNORECASE | re.DOTALL)
     msg = msg.strip().splitlines()
@@ -211,12 +351,187 @@ class Job:
 
 
 class JobManager:
-    def __init__(self) -> None:
+    def __init__(self, db_path: Optional[Path | str] = None) -> None:
         self._jobs: Dict[str, Job] = {}
         self._lock = threading.Lock()
         self._slots = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
         self._changed = threading.Condition()
         self._version = 0
+        self._db_path = Path(db_path) if db_path else DB_PATH
+        # Dedicated lock for all SQLite access (connections are opened
+        # per-operation, this lock serializes them for thread safety).
+        self._db_lock = threading.Lock()
+        self._init_db()
+        self._load_jobs()
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(str(self._db_path), check_same_thread=False, timeout=10.0)
+
+    def _init_db(self) -> None:
+        with self._db_lock:
+            con = self._connect()
+            try:
+                con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS jobs (
+                        id TEXT PRIMARY KEY,
+                        url TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        quality TEXT NOT NULL,
+                        playlist INTEGER NOT NULL,
+                        title TEXT,
+                        thumbnail TEXT,
+                        status TEXT,
+                        percent REAL,
+                        speed REAL,
+                        eta INTEGER,
+                        entry INTEGER,
+                        entries INTEGER,
+                        filename TEXT,
+                        files TEXT,
+                        error TEXT,
+                        actual_height INTEGER,
+                        created_at REAL,
+                        cancel_requested INTEGER
+                    )
+                    """
+                )
+                con.commit()
+            finally:
+                con.close()
+
+    def _save_job(self, job: Job) -> None:
+        try:
+            with self._db_lock:
+                con = self._connect()
+                try:
+                    con.execute(
+                        """
+                        INSERT OR REPLACE INTO jobs
+                        (id, url, mode, quality, playlist, title, thumbnail,
+                         status, percent, speed, eta, entry, entries,
+                         filename, files, error, actual_height,
+                         created_at, cancel_requested)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            job.id,
+                            job.url,
+                            job.mode,
+                            job.quality,
+                            1 if job.playlist else 0,
+                            job.title,
+                            job.thumbnail,
+                            job.status,
+                            job.percent,
+                            job.speed,
+                            job.eta,
+                            job.entry,
+                            job.entries,
+                            job.filename,
+                            json.dumps(job.files or []),
+                            job.error,
+                            job.actual_height,
+                            job.created_at,
+                            1 if job.cancel_requested else 0,
+                        ),
+                    )
+                    con.commit()
+                finally:
+                    con.close()
+        except Exception:
+            # Persistence must never break downloads/progress updates.
+            pass
+
+    def _delete_job_from_db(self, job_id: str) -> None:
+        try:
+            with self._db_lock:
+                con = self._connect()
+                try:
+                    con.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+                    con.commit()
+                finally:
+                    con.close()
+        except Exception:
+            pass
+
+    def _load_jobs(self) -> None:
+        try:
+            with self._db_lock:
+                con = self._connect()
+                try:
+                    cur = con.execute("SELECT * FROM jobs")
+                    cols = [d[0] for d in cur.description] if cur.description else []
+                    rows = cur.fetchall()
+                finally:
+                    con.close()
+        except Exception:
+            return
+        if not rows:
+            return
+        loaded: List[Job] = []
+        for row in rows:
+            try:
+                data = dict(zip(cols, row))
+                files_raw = data.get("files") or "[]"
+                try:
+                    files = json.loads(files_raw) if isinstance(files_raw, str) else []
+                except Exception:
+                    files = []
+                if not isinstance(files, list):
+                    files = []
+                job = Job(
+                    id=str(data.get("id")),
+                    url=str(data.get("url") or ""),
+                    mode=str(data.get("mode") or "video"),
+                    quality=str(data.get("quality") or "best"),
+                    playlist=bool(data.get("playlist")),
+                    title=str(data.get("title") or ""),
+                    thumbnail=str(data.get("thumbnail") or ""),
+                    status=str(data.get("status") or "queued"),
+                    percent=float(data.get("percent") or 0.0),
+                    speed=data.get("speed"),
+                    eta=data.get("eta"),
+                    entry=data.get("entry"),
+                    entries=data.get("entries"),
+                    filename=str(data.get("filename") or ""),
+                    files=[str(p) for p in files],
+                    error=str(data.get("error") or ""),
+                    actual_height=data.get("actual_height"),
+                    created_at=float(data.get("created_at") or time.time()),
+                    cancel_requested=bool(data.get("cancel_requested")),
+                )
+                # Jobs that were active when the server stopped can never
+                # resume mid-download, so mark them as interrupted instead
+                # of leaving them stuck in queued/downloading/processing.
+                if job.status in ACTIVE_STATUSES:
+                    job.status = "error"
+                    job.error = "Interrupted by server restart"
+                    job.speed = None
+                    job.eta = None
+                    job.cancel_requested = False
+                job.notify = lambda j=job: self._on_job_changed(j)
+                loaded.append(job)
+            except Exception:
+                continue
+        with self._lock:
+            for job in loaded:
+                self._jobs[job.id] = job
+            self._prune_locked()
+        # Persist any status corrections (interrupted jobs) + enforce
+        # pruning in the DB as well (_prune_locked already deleted
+        # trimmed rows from the DB).
+        for job in loaded:
+            if job.id in self._jobs:
+                self._save_job(job)
+            else:
+                self._delete_job_from_db(job.id)
+        if loaded:
+            self._notify()
+
+    def _on_job_changed(self, job: Job) -> None:
+        self._save_job(job)
+        self._notify()
 
     def _notify(self) -> None:
         with self._changed:
@@ -235,10 +550,11 @@ class JobManager:
 
     def create(self, url: str, mode: str, quality: str, playlist: bool) -> Job:
         job = Job(id=uuid.uuid4().hex[:12], url=url, mode=mode, quality=quality, playlist=playlist)
-        job.notify = self._notify
+        job.notify = lambda: self._on_job_changed(job)
         with self._lock:
             self._prune_locked()
             self._jobs[job.id] = job
+        self._save_job(job)
         self._notify()
         threading.Thread(target=self._run, args=(job,), daemon=True).start()
         return job
@@ -250,6 +566,7 @@ class JobManager:
         done.sort(key=lambda j: j.created_at)
         for job in done[: len(self._jobs) - MAX_JOBS_KEPT + 1]:
             self._jobs.pop(job.id, None)
+            self._delete_job_from_db(job.id)
 
     def get(self, job_id: str) -> Optional[Job]:
         with self._lock:
@@ -276,6 +593,7 @@ class JobManager:
         with self._lock:
             removed = self._jobs.pop(job_id, None) is not None
         if removed:
+            self._delete_job_from_db(job_id)
             self._notify()
         return removed
 
@@ -284,6 +602,19 @@ class JobManager:
             stale = [jid for jid, j in self._jobs.items() if j.status not in ACTIVE_STATUSES]
             for jid in stale:
                 self._jobs.pop(jid, None)
+        for jid in stale:
+            self._delete_job_from_db(jid)
+        if stale:
+            self._notify()
+        return len(stale)
+
+    def clear_failed(self) -> int:
+        with self._lock:
+            stale = [jid for jid, j in self._jobs.items() if j.status == "error"]
+            for jid in stale:
+                self._jobs.pop(jid, None)
+        for jid in stale:
+            self._delete_job_from_db(jid)
         if stale:
             self._notify()
         return len(stale)
@@ -349,6 +680,9 @@ def build_options(job: Job) -> Dict[str, Any]:
     ffmpeg = find_ffmpeg()
     if ffmpeg:
         opts["ffmpeg_location"] = ffmpeg
+    cookiefile = get_cookiefile()
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
 
     if job.mode == "audio":
         codec = job.quality if job.quality in AUDIO_FORMATS else "mp3"
@@ -453,6 +787,9 @@ def probe(url: str) -> Dict[str, Any]:
         "extract_flat": "in_playlist",
         "socket_timeout": 20,
     }
+    cookiefile = get_cookiefile()
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -475,6 +812,7 @@ def probe(url: str) -> Dict[str, Any]:
     ]
     thumbnails = info.get("thumbnails") or []
     thumbnail = info.get("thumbnail") or (thumbnails[-1].get("url") if thumbnails else "")
+    thumbnail = thumbnail or PLACEHOLDER_THUMBNAIL
     heights = sorted(
         {
             f.get("height")
@@ -483,6 +821,18 @@ def probe(url: str) -> Dict[str, Any]:
         },
         reverse=True,
     )
+    # --- Inline-preview enrichment (additive; existing fields untouched) ---
+    page_url = info.get("webpage_url") or url
+    platform = detect_platform(page_url)
+    video_id: Optional[str] = None
+    if platform == "youtube":
+        video_id = extract_youtube_id(page_url)
+        if not video_id:
+            info_id = info.get("id")
+            video_id = info_id if isinstance(info_id, str) and _YT_ID_RE.match(info_id) else None
+    direct_url: Optional[str] = None
+    if not is_playlist and platform != "youtube":
+        direct_url = pick_direct_url(info)
     return {
         "ok": True,
         "type": "playlist" if is_playlist else "video",
@@ -490,8 +840,13 @@ def probe(url: str) -> Dict[str, Any]:
         "uploader": info.get("uploader") or info.get("channel") or "",
         "duration": durations,
         "thumbnail": thumbnail,
-        "url": info.get("webpage_url") or url,
+        "url": page_url,
         "count": info.get("playlist_count") or len(entries) or 1,
         "entries": entries,
         "heights": [h for h in heights if h],
+        "platform": platform,
+        "video_id": video_id,
+        "embed_url": youtube_embed_url(video_id),
+        "direct_url": direct_url,
+        "media": "image" if is_image_url(direct_url) else "video",
     }
