@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Ultimate Media Downloader — frontend client
+   Media Downloader — frontend client (v1.0.0)
    API + SSE behavior is identical to the original client; only the DOM
    this renders into was redesigned (glassmorphism theme).
    Endpoints used: POST /api/info, POST /api/download, GET /api/jobs,
@@ -33,6 +33,7 @@ const STATUS_LABEL = {
   downloading: "Downloading",
   processing: "Converting",
   finished: "Completed",
+  paused: "Paused",
   error: "Failed",
   cancelled: "Cancelled",
 };
@@ -140,7 +141,7 @@ function fmtEta(s) {
   if (s === null || s === undefined) return "";
   s = Math.max(0, Math.round(s));
   const m = Math.floor(s / 60);
-  return "ETA " + m + ":" + String(s % 60).padStart(2, "0");
+  return "Time " + m + ":" + String(s % 60).padStart(2, "0");
 }
 
 function fmtDur(s) {
@@ -183,9 +184,19 @@ function toast(message, isError = false) {
     item.classList.add("leaving");
     setTimeout(() => item.remove(), 320);
   };
-  item.addEventListener("click", dismiss);
-  const timer = setTimeout(dismiss, 4000);
+  item.addEventListener("click", () => {
+    clearTimeout(timer);
+    dismiss();
+  });
+  const timer = setTimeout(() => {
+    dismiss();
+    if (toast._timers) {
+      const i = toast._timers.indexOf(timer);
+      if (i !== -1) toast._timers.splice(i, 1);
+    }
+  }, 4000);
   (toast._timers = toast._timers || []).push(timer);
+  if (toast._timers.length > 20) toast._timers.splice(0, toast._timers.length - 20);
 }
 
 /* Glass confirmation modal for destructive actions. Resolves true when the
@@ -448,6 +459,22 @@ async function startDownload() {
 
 /* ---------- job list rendering ---------- */
 
+// Auto-download: finished files save straight to the browser's default
+// Downloads folder (Content-Disposition: attachment) with no manual click.
+const autoDownloaded = new Set();
+function autoDownload(job) {
+  if (!job || job.status !== "finished" || !job.file) return;
+  if (autoDownloaded.has(job.id)) return;
+  autoDownloaded.add(job.id);
+  const a = document.createElement("a");
+  a.href = `/api/jobs/${job.id}/file`;
+  a.download = job.file || "";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 function createJobEl(job) {
   const el = document.createElement("article");
   el.className = "job glass job-enter";
@@ -464,10 +491,9 @@ function createJobEl(job) {
       <p class="job-error hidden"></p>
     </div>
     <div class="job-actions">
-      <a class="btn primary save" href="#">Save</a>
       <button type="button" class="btn ghost retry" data-action="retry">Retry</button>
-      <button type="button" class="btn ghost cancel" data-action="cancel">Cancel</button>
-      <button type="button" class="btn ghost danger remove" data-action="remove">Remove</button>
+      <button type="button" class="btn ghost stop" data-action="stop">Stop</button>
+      <button type="button" class="btn primary resume" data-action="resume">Resume</button>
     </div>`;
   el._refs = {
     thumb: el.querySelector(".job-thumb"),
@@ -476,10 +502,9 @@ function createJobEl(job) {
     fill: el.querySelector(".fill"),
     meta: el.querySelector(".job-meta"),
     error: el.querySelector(".job-error"),
-    save: el.querySelector(".save"),
     retry: el.querySelector(".retry"),
-    cancel: el.querySelector(".cancel"),
-    remove: el.querySelector(".remove"),
+    stop: el.querySelector(".stop"),
+    resume: el.querySelector(".resume"),
   };
   return el;
 }
@@ -497,15 +522,21 @@ function updateJobEl(el, job) {
   r.badge.dataset.for = job.status;
 
   const thumbSrc = job.thumbnail || "";
-  const hasImg = Boolean(r.thumb.querySelector("img"));
-  if (thumbSrc && !hasImg) {
-    const img = document.createElement("img");
-    img.src = thumbSrc;
-    img.alt = "";
-    img.loading = "lazy";
-    img.onerror = () => img.remove();
-    r.thumb.replaceChildren(img);
-  } else if (!thumbSrc && hasImg) {
+  const thumbImg = r.thumb.querySelector("img");
+  if (thumbSrc) {
+    if (!thumbImg) {
+      const img = document.createElement("img");
+      img.src = thumbSrc;
+      img.alt = "";
+      img.loading = "lazy";
+      img.onerror = () => img.remove();
+      r.thumb.replaceChildren(img);
+    } else if (thumbImg.getAttribute("src") !== thumbSrc) {
+      // Thumbnail arrived/updated after the first render (e.g. playlist
+      // entries): swap the source instead of keeping the stale image.
+      thumbImg.src = thumbSrc;
+    }
+  } else if (thumbImg) {
     r.thumb.replaceChildren();
   }
   if (!r.thumb.querySelector("img")) {
@@ -551,16 +582,15 @@ function updateJobEl(el, job) {
 
   const isActive = ACTIVE.includes(job.status);
   const isFailed = job.status === "error";
-  r.save.href = job.status === "finished" && job.file
-    ? `/api/jobs/${job.id}/file`
-    : "#";
-  r.save.classList.toggle("hidden", !(job.status === "finished" && job.file));
+  const isPaused = job.status === "paused" || job.status === "cancelled";
+  // Completed cards: no Save / Remove buttons (auto-download handles saving,
+  // Clear finished / Clear Failed handle removal).
   r.retry.classList.toggle("hidden", !isFailed);
-  r.cancel.classList.toggle("hidden", !isActive);
-  r.remove.classList.toggle("hidden", isActive);
+  r.stop.classList.toggle("hidden", !isActive);
+  r.resume.classList.toggle("hidden", !(isPaused || isFailed));
 }
 
-const EMPTY_DEFAULT_HTML = "Nothing here yet &mdash; paste a link above and hit Download.";
+const EMPTY_DEFAULT_HTML = "Your downloads will appear here.";
 
 function renderJobs(jobs) {
   const seen = new Set();
@@ -624,11 +654,30 @@ function syncLiveUpdates() {
 }
 
 function applyJobs(jobs) {
+  // Only auto-download on active -> finished transition.
+  // Jobs already finished on first load / refresh are marked as seen
+  // so refresh never re-triggers the browser download.
+  const prevStatus = new Map(currentJobs.map((j) => [j.id, j.status]));
+  const isFirstLoad = !firstJobsLoaded;
   currentJobs = jobs;
-  renderJobs(jobs);
-  if (!firstJobsLoaded) {
+  if (isFirstLoad) {
     firstJobsLoaded = true;
-    if (els.jobsLoading) els.jobsLoading.remove();
+    if (els.jobsLoading) {
+      els.jobsLoading.remove();
+      els.jobsLoading = null;
+    }
+  }
+  renderJobs(jobs);
+  for (const job of jobs) {
+    if (job.status !== "finished" || !job.file) continue;
+    if (autoDownloaded.has(job.id)) continue;
+    if (isFirstLoad) {
+      autoDownloaded.add(job.id);
+      continue;
+    }
+    const prev = prevStatus.get(job.id);
+    if (prev === undefined || ACTIVE.includes(prev)) autoDownload(job);
+    else autoDownloaded.add(job.id);
   }
   if (!offline && !rateLimitTimer) setConn(sseConnected ? "live" : "polling", "");
   syncLiveUpdates();
@@ -741,8 +790,10 @@ function connectEvents() {
 
 function teardownLiveUpdates() {
   stopPolling();
-  clearTimeout(toast._t);
-  if (toast._timers) toast._timers.forEach(clearTimeout);
+  if (toast._timers) {
+    toast._timers.forEach(clearTimeout);
+    toast._timers = [];
+  }
   if (els.toast) els.toast.innerHTML = "";
   if (_confirmResolve) _closeConfirm(false);
   clearTimeout(rateLimitTimer);
@@ -770,6 +821,17 @@ if (window.__mdCleanup) {
 window.__mdCleanup = teardownLiveUpdates;
 
 window.addEventListener("pagehide", teardownLiveUpdates);
+
+// Restored from the back/forward cache: pagehide tore everything down, so
+// rebuild the single SSE stream and refresh the snapshot instead of leaving
+// the UI dead until the next visibility change.
+window.addEventListener("pageshow", (event) => {
+  if (!event.persisted) return;
+  offline = !navigator.onLine;
+  reconnectDelay = RECONNECT_BASE;
+  connectEvents();
+  refreshJobs();
+});
 
 window.addEventListener("offline", () => {
   offline = true;
@@ -827,6 +889,8 @@ function applyTheme(theme) {
   }
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute("content", next === "dark" ? "#07070f" : "#eef2ff");
+  const scheme = document.querySelector('meta[name="color-scheme"]');
+  if (scheme) scheme.setAttribute("content", next);
 }
 
 if (els.themeToggle) {
@@ -961,7 +1025,8 @@ els.clear.addEventListener("click", async () => {
   if (clearBusy) return;
   const ok = await confirmDialog({
     title: "Clear finished?",
-    message: "This removes all completed, cancelled and failed entries from the list. Files stay on disk.",
+    message: "This removes all completed and stopped entries from the list. Paused downloads are kept so you can resume them.",
+
     okLabel: "Clear finished",
   });
   if (!ok) return;
@@ -1030,14 +1095,6 @@ if (els.clearFailed) {
 }
 
 els.jobs.addEventListener("click", async (event) => {
-  // The "Save" anchor uses href="#" as a placeholder until the file is
-  // ready. Swallow those clicks so background state updates can never
-  // trigger a page navigation / full reload of `/` + static assets.
-  const save = event.target.closest("a.save");
-  if (save && (save.getAttribute("href") === "#" || save.classList.contains("hidden"))) {
-    event.preventDefault();
-    return;
-  }
   const btn = event.target.closest("button[data-action]");
   if (!btn) return;
   const id = btn.closest(".job").dataset.id;
@@ -1069,6 +1126,49 @@ els.jobs.addEventListener("click", async (event) => {
       await refreshJobs();
       return;
     }
+    if (btn.dataset.action === "stop" || btn.dataset.action === "pause") {
+      let res;
+      try {
+        res = await fetch(`/api/jobs/${id}/stop`, { method: "POST" });
+      } catch {
+        toast("Can't reach the server.", true);
+        return;
+      }
+      if (res.status === 429) {
+        handleRateLimit(res);
+        return;
+      }
+      if (!res.ok && res.status !== 404) {
+        toast(`Stop failed (${res.status})`, true);
+        return;
+      }
+      toast("Download stopped — Resume anytime.");
+      await refreshJobs();
+      return;
+    }
+    if (btn.dataset.action === "resume") {
+      autoDownloaded.delete(id);
+      let res;
+      try {
+        res = await fetch(`/api/jobs/${id}/resume`, { method: "POST" });
+      } catch {
+        toast("Can't reach the server.", true);
+        return;
+      }
+      if (res.status === 429) {
+        handleRateLimit(res);
+        return;
+      }
+      if (!res.ok && res.status !== 404) {
+        const data = await res.json().catch(() => ({}));
+        toast(data.detail || `Resume failed (${res.status})`, true);
+        return;
+      }
+      toast("Resuming download…");
+      await refreshJobs();
+      return;
+    }
+    // Legacy fallback (no Save/Remove buttons in UI anymore).
     const drop = btn.dataset.action === "remove";
     let res;
     try {

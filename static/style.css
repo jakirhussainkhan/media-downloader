@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Ultimate Media Downloader — premium dark glassmorphism theme
+   Media Downloader — premium dark glassmorphism theme
    Fonts: Outfit (display) + Inter (body). Tokens, glass, blobs, buttons,
    badges, progress shimmer, skeletons, responsive grid.
    ========================================================================== */
@@ -477,6 +477,10 @@ select option, select optgroup { background-color: var(--option-bg); color: var(
   background: rgba(248, 113, 113, 0.1); box-shadow: 0 0 14px rgba(248, 113, 113, 0.25);
 }
 .badge[data-for="cancelled"] { color: var(--muted); border-color: var(--border-strong); }
+.badge[data-for="paused"] {
+  color: var(--warn); border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.08);
+}
 @keyframes pulse { 50% { opacity: 0.55; } }
 
 /* progress bar with glow + shimmer */

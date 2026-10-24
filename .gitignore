@@ -3,8 +3,26 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv*/
 venv/
+env/
+ENV/
+build/
+dist/
+*.egg
+
+# Environment / secrets — never commit these
 .env
+.env.*
+!.env.example
+TOKEN
+*.pem
+*.key
+cookies.txt
+secrets.json
+
+# Node (frontend tooling, if ever added)
+node_modules/
 
 # Downloads (user content, large binaries)
 downloads/
@@ -24,3 +42,9 @@ Thumbs.db
 
 # Logs / temp
 *.log
+
+# EXE build artifacts
+*.spec~
+bin/
+assets/icon.ico
+MediaDownloader-Portable.zip

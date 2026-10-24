@@ -1,5 +1,7 @@
 # Media Downloader
 
+**Version 1.0.0 — stable release**
+
 A small self-hosted web app for downloading media from **YouTube, Facebook, Instagram, TikTok, X (Twitter) and Pinterest**.
 
 Built with **FastAPI + yt-dlp**, single-page UI, live progress bars.
@@ -14,7 +16,9 @@ Built with **FastAPI + yt-dlp**, single-page UI, live progress bars.
 - Link preview (title, thumbnail, duration, available resolutions)
 - Live progress with speed, ETA and per-item counter for playlists
 - Cancel / remove jobs, save finished files straight from the browser
-- Files are written to `./downloads/`
+- Finished files are ephemeral: stored outside the project folder (OS temp
+  dir, override with `MEDIA_DOWNLOADER_DIR`), auto-deleted when you
+  remove/clear the job and expired after 48h (`MEDIA_DOWNLOADER_RETENTION_HOURS`)
 
 ## Requirements
 
@@ -62,14 +66,22 @@ Restart the shell afterwards. The app also auto-detects the winget install locat
 
 | Method | Route | Body / params |
 | --- | --- | --- |
+| `GET` | `/api/health` | liveness probe — returns app name and version |
 | `POST` | `/api/info` | `{"url": "..."}` → title, thumbnail, duration, formats |
 | `POST` | `/api/download` | `{"urls": [...], "mode": "video"\|"audio", "quality": "1080"\|"mp3"\|..., "playlist": false}` |
 | `GET` | `/api/jobs` | job list + progress |
 | `GET` | `/api/events` | Server-Sent Events stream — job updates pushed only when something changes |
 | `GET` | `/api/jobs/{id}` | single job |
-| `GET` | `/api/jobs/{id}/file` | download the finished file |
+| `GET` | `/api/jobs/{id}/file` | download the finished file (supports HTTP Range) |
+| `POST` | `/api/jobs/{id}/stop` | stop a download, keeping partial data |
+| `POST` | `/api/jobs/{id}/pause` | pause a download, keeping partial data |
+| `POST` | `/api/jobs/{id}/resume` | resume a paused/stopped/failed job in place |
+| `POST` | `/api/jobs/{id}/retry` | start a fresh job from an existing one |
 | `DELETE` | `/api/jobs/{id}?drop=true\|false` | remove / cancel a job |
-| `DELETE` | `/api/jobs` | clear finished entries |
+| `DELETE` | `/api/jobs` | clear finished entries (`?status=failed` for failed ones) |
+| `POST` | `/api/upload-cookies` | upload a Netscape `cookies.txt` (max 1 MB) |
+| `GET` | `/api/cookies/status` | whether cookies have been uploaded |
+| `GET` | `/api/thumbnail?url=...` | SSRF-guarded thumbnail proxy |
 
 ## Troubleshooting
 
@@ -79,6 +91,20 @@ Restart the shell afterwards. The app also auto-detects the winget install locat
   ```
 - **Instagram / Facebook / TikTok / X need login**: some posts are only visible to logged-in users. Export browser cookies with a `cookies.txt` extension and they can be wired into yt-dlp (`cookiefile` option) if needed.
 - **Merge fails / "ffmpeg not installed"**: install ffmpeg and restart the terminal.
+
+## Release notes
+
+### v1.0.0 — first stable release
+
+- Rebranded the app as **Media Downloader** (UI, API title, tray app and installer).
+- Full project version set to `1.0.0` (API `/api/health`, `pyproject.toml`, installer).
+- Stability fixes: deleting a queued job now actually cancels its worker; RSS
+  feeds with malformed format heights no longer break link previews; download
+  requests are protected by the same private-host (SSRF) guard as previews.
+- Frontend: thumbnails refresh in place, and the live update stream recovers
+  correctly when the page is restored from the back/forward cache.
+- Pause / resume / stop, batch downloads, playlist support and cookie upload
+  included.
 
 ## Disclaimer
 
