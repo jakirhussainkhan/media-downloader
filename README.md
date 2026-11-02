@@ -27,9 +27,25 @@ Built with **FastAPI + yt-dlp**, single-page UI, live progress bars.
 
 ## Quick start
 
+### Windows (PowerShell)
+
 ```powershell
 .\run.ps1
 ```
+
+Stop it with `.\stop.ps1`, or press `Ctrl+C` if it runs in the foreground.
+
+### Linux / macOS
+
+```bash
+./run.sh              # foreground, Ctrl+C to stop
+./run.sh --background # detached, logs to server.log
+./stop.sh             # stop whatever is listening on port 8000
+```
+
+`run.sh` creates `.venv` (or `.venv-linux` if `.venv` belongs to Windows),
+installs dependencies when online, and keeps `yt-dlp` up to date. Pass
+`--port 8080` to either script to use another port.
 
 Then open <http://127.0.0.1:8000> on this PC.
 
@@ -46,7 +62,7 @@ can reach it via your PC's LAN IP, e.g. `http://192.168.x.x:8000`:
 > Windows may prompt to allow Python/Uvicorn through the firewall on first
 > LAN access — click Allow.
 
-Manual start:
+Manual start (Windows):
 
 ```powershell
 python -m venv .venv
@@ -54,10 +70,27 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-### Installing ffmpeg (once, Windows)
+Manual start (Linux / macOS):
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+### Installing ffmpeg (once)
+
+Windows:
 
 ```powershell
 winget install Gyan.FFmpeg
+```
+
+Linux / macOS:
+
+```bash
+sudo apt install ffmpeg   # Debian/Ubuntu (dnf/pacman on Fedora/Arch)
+brew install ffmpeg       # macOS
 ```
 
 Restart the shell afterwards. The app also auto-detects the winget install location, so no configuration is needed.
